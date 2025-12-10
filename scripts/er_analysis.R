@@ -7,24 +7,49 @@ options(stringsAsFactors = FALSE)
 required_pkgs <- c(
   "DESeq2", "ggplot2", "dplyr", "tibble", "readr", "tidyr",
   "pheatmap", "fgsea", "msigdbr", "org.Hs.eg.db", "AnnotationDbi",
-  "data.table", "netZooR"
+  "data.table", "BiocParallel", "matrixStats"
 )
 
 install_if_missing <- function(pkgs) {
   for (p in pkgs) {
     if (!requireNamespace(p, quietly = TRUE)) {
-      if (!requireNamespace("BiocManager", quietly = TRUE)) {
-        install.packages("BiocManager", repos = "https://cloud.r-project.org")
-      }
-      BiocManager::install(p, ask = FALSE, update = FALSE)
+      message("Package ", p, " not found; attempting install (requires internet).")
+      tryCatch({
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager", repos = "https://cloud.r-project.org")
+        }
+        BiocManager::install(p, ask = FALSE, update = FALSE)
+      }, error = function(e) {
+        stop("Package ", p, " is required but could not be installed automatically. ",
+             "Install it manually (internet needed) and re-run. Details: ", e$message)
+      })
     }
     library(p, character.only = TRUE)
   }
 }
 install_if_missing(required_pkgs)
 
-dir.create("results/figures", recursive = TRUE, showWarnings = FALSE)
-dir.create("results/tables", recursive = TRUE, showWarnings = FALSE)
+has_netZooR <- requireNamespace("netZooR", quietly = TRUE)
+if (!has_netZooR) {
+  message("netZooR not installed; PANDA will fall back to correlation-based weights.")
+}
+has_clusterProfiler <- requireNamespace("clusterProfiler", quietly = TRUE)
+if (!has_clusterProfiler) {
+  message("clusterProfiler not installed; TF-target enrichment will be skipped. Install manually to enable.")
+}
+
+workers <- max(1, parallel::detectCores() - 1)
+bp_param <- BiocParallel::MulticoreParam(workers = workers)
+use_parallel <- workers > 1
+fgsea_nperm <- 2000  # reduce permutations for speed
+max_network_genes <- 5000  # cap genes passed into PANDA/correlation
+message("Parallel workers for DE/network: ", workers)
+
+er_dir <- file.path("results", "er_analysis")
+er_fig_dir <- file.path(er_dir, "figures")
+er_tbl_dir <- file.path(er_dir, "tables")
+dir.create(er_fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(er_tbl_dir, recursive = TRUE, showWarnings = FALSE)
 
 # -------------------- Helpers --------------------
 strip_version <- function(x) sub("\\..*$", "", x)
@@ -98,8 +123,8 @@ cat("Genes retained after low-expression filter:", nrow(expr_filt), "\n")
 
 # -------------------- DESeq2 setup & normalization --------------------
 dds <- DESeq2::DESeqDataSetFromMatrix(countData = expr_filt, colData = meta, design = ~ ER_status)
-dds <- DESeq2::DESeq(dds)  # DESeq2 chosen for count-based RNA-seq with stable shrinkage
-vsd <- DESeq2::vst(dds)
+dds <- DESeq2::DESeq(dds, parallel = use_parallel, BPPARAM = bp_param)  # DESeq2 chosen for count-based RNA-seq with stable shrinkage
+vsd <- DESeq2::vst(dds, blind = FALSE)
 norm_mat <- SummarizedExperiment::assay(vsd)
 
 # -------------------- PCA and clustering (all genes) --------------------
@@ -108,19 +133,19 @@ pca_df <- data.frame(pca_res$x[, 1:2], ER_status = meta$ER_status, sample = rown
 p_pca <- ggplot(pca_df, aes(PC1, PC2, color = ER_status, label = sample)) +
   geom_point(size = 3) + geom_text(vjust = 1.5, size = 2) +
   theme_bw() + labs(title = "PCA on vst counts", color = "ER status")
-ggsave("results/figures/pca_all_genes_er_status.pdf", p_pca, width = 6, height = 5)
+ggsave(file.path(er_fig_dir, "pca_all_genes_er_status.pdf"), p_pca, width = 6, height = 5)
 
 km_res <- kmeans(t(norm_mat), centers = 2, nstart = 50)
 km_table <- as.data.frame.matrix(table(km_res$cluster, meta$ER_status))
 km_table$cluster <- rownames(km_table)
-readr::write_csv(km_table, "results/tables/kmeans_cluster_vs_er.csv")
+readr::write_csv(km_table, file.path(er_tbl_dir, "kmeans_cluster_vs_er.csv"))
 
 hc_res <- hclust(dist(t(norm_mat)), method = "ward.D2")
 hc_clusters <- cutree(hc_res, k = 2)
 hc_table <- as.data.frame.matrix(table(hc_clusters, meta$ER_status))
 hc_table$cluster <- rownames(hc_table)
-readr::write_csv(hc_table, "results/tables/hclust_cluster_vs_er.csv")
-pdf("results/figures/hclust_dendrogram_all_genes.pdf", width = 6, height = 5)
+readr::write_csv(hc_table, file.path(er_tbl_dir, "hclust_cluster_vs_er.csv"))
+pdf(file.path(er_fig_dir, "hclust_dendrogram_all_genes.pdf"), width = 6, height = 5)
 plot(hc_res, labels = meta$ER_status, main = "Hierarchical clustering (all genes)")
 abline(h = tail(hc_res$height, 1) / 2, col = "red", lty = 2)
 dev.off()
@@ -130,13 +155,13 @@ res <- DESeq2::results(dds, contrast = c("ER_status", "ERpos", "ERneg"))
 res_tbl <- as.data.frame(res) %>%
   rownames_to_column("gene") %>%
   arrange(padj)
-readr::write_csv(res_tbl, "results/tables/deseq2_erpos_vs_erneg_full.csv")
+readr::write_csv(res_tbl, file.path(er_tbl_dir, "deseq2_erpos_vs_erneg_full.csv"))
 
 ranked_genes <- res_tbl %>%
   filter(!is.na(stat)) %>%
   mutate(rank = rank(-stat, ties.method = "average")) %>%
   arrange(rank)
-readr::write_tsv(ranked_genes[, c("gene", "stat")], "results/tables/ranked_genes_stat.tsv")
+readr::write_tsv(ranked_genes[, c("gene", "stat")], file.path(er_tbl_dir, "ranked_genes_stat.tsv"))
 
 p_volcano <- res_tbl %>%
   mutate(sig = ifelse(!is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 1, "Significant", "NS")) %>%
@@ -144,7 +169,7 @@ p_volcano <- res_tbl %>%
   geom_point(aes(color = sig), alpha = 0.6) +
   scale_color_manual(values = c(NS = "grey70", Significant = "firebrick")) +
   theme_bw() + labs(title = "ERpos vs ERneg DESeq2", color = "")
-ggsave("results/figures/volcano_erpos_vs_erneg.pdf", p_volcano, width = 6, height = 5)
+ggsave(file.path(er_fig_dir, "volcano_erpos_vs_erneg.pdf"), p_volcano, width = 6, height = 5)
 
 # -------------------- PCA & clustering on DE genes --------------------
 sig_genes <- res_tbl %>%
@@ -157,14 +182,14 @@ if (length(sig_genes) >= 3) {
   p_pca_sig <- ggplot(pca_sig_df, aes(PC1, PC2, color = ER_status, label = sample)) +
     geom_point(size = 3) + geom_text(vjust = 1.5, size = 2) +
     theme_bw() + labs(title = "PCA on significant DE genes", color = "ER status")
-  ggsave("results/figures/pca_sig_genes.pdf", p_pca_sig, width = 6, height = 5)
+  ggsave(file.path(er_fig_dir, "pca_sig_genes.pdf"), p_pca_sig, width = 6, height = 5)
   
   ann_df <- data.frame(ER_status = meta$ER_status)
   rownames(ann_df) <- rownames(meta)
   pheatmap(norm_sig, scale = "row", annotation_col = ann_df,
            show_rownames = FALSE, fontsize_col = 8,
            main = "DE genes heatmap (vst counts)",
-           filename = "results/figures/heatmap_sig_genes.pdf")
+           filename = file.path(er_fig_dir, "heatmap_sig_genes.pdf"))
   # Comment: Subtype separation should tighten here if DE genes capture ER biology.
 }
 
@@ -182,14 +207,14 @@ go_sets <- msigdbr::msigdbr(
 ) %>%
   dplyr::select(gs_name, gene_symbol)
 go_list <- split(go_sets$gene_symbol, go_sets$gs_name)
-fgsea_res <- fgsea::fgsea(pathways = go_list, stats = gene_ranks, nperm = 5000)
+fgsea_res <- fgsea::fgsea(pathways = go_list, stats = gene_ranks, nperm = fgsea_nperm)
 fgsea_tbl <- fgsea_res %>%
   arrange(padj) %>%
   as_tibble()
-readr::write_csv(fgsea_tbl, "results/tables/fgsea_go_bp_erpos_vs_erneg.csv")
+readr::write_csv(fgsea_tbl, file.path(er_tbl_dir, "fgsea_go_bp_erpos_vs_erneg.csv"))
 top_path <- fgsea_tbl$pathway[1]
 if (!is.null(top_path) && !is.na(top_path)) {
-  pdf("results/figures/fgsea_enrichment_top_pathway.pdf", width = 6, height = 5)
+  pdf(file.path(er_fig_dir, "fgsea_enrichment_top_pathway.pdf"), width = 6, height = 5)
   plotEnrichment(go_list[[top_path]], gene_ranks) + ggtitle(top_path)
   dev.off()
 }
@@ -212,11 +237,16 @@ ppi_prior <- motif_prior %>%
   distinct(tf) %>%
   transmute(protein1 = tf, protein2 = tf, score = 1)
 
-panda_input <- function(expr_sub, motif_df, ppi_df) {
+panda_input <- function(expr_sub, motif_df, ppi_df, use_netzoo = has_netZooR, max_genes = max_network_genes) {
   shared_genes <- intersect(rownames(expr_sub), motif_df$target)
+  if (length(shared_genes) > max_genes) {
+    # keep top variable targets to reduce runtime
+    var_order <- order(matrixStats::rowVars(expr_sub[shared_genes, , drop = FALSE], na.rm = TRUE), decreasing = TRUE)
+    shared_genes <- shared_genes[var_order[seq_len(max_genes)]]
+  }
   expr_use <- expr_sub[shared_genes, , drop = FALSE]
   motif_use <- motif_df %>% filter(target %in% shared_genes)
-  if (requireNamespace("netZooR", quietly = TRUE)) {
+  if (use_netzoo) {
     colnames(motif_use) <- c("TF", "Gene", "Strength")
     colnames(ppi_df) <- c("Protein1", "Protein2", "Weight")
     panda_net <- netZooR::panda(motif = motif_use, ppi = ppi_df, expression = expr_use)
@@ -241,8 +271,8 @@ expr_erneg <- norm_mat[, meta$ER_status == "ERneg", drop = FALSE]
 net_erpos <- panda_input(expr_erpos, motif_prior, ppi_prior)
 net_erneg <- panda_input(expr_erneg, motif_prior, ppi_prior)
 
-saveRDS(net_erpos, "results/tables/panda_network_erpos.rds")
-saveRDS(net_erneg, "results/tables/panda_network_erneg.rds")
+saveRDS(net_erpos, file.path(er_tbl_dir, "panda_network_erpos.rds"))
+saveRDS(net_erneg, file.path(er_tbl_dir, "panda_network_erneg.rds"))
 
 # -------------------- Differential targeting --------------------
 net_merged <- net_erpos %>%
@@ -259,37 +289,50 @@ tf_diff <- net_merged %>%
     n_targets = n()
   ) %>%
   arrange(desc(abs(mean_delta)))
-readr::write_csv(tf_diff, "results/tables/differential_targeting_tf.csv")
+readr::write_csv(tf_diff, file.path(er_tbl_dir, "differential_targeting_tf.csv"))
 
 top_tfs <- tf_diff %>% slice_head(n = 5) %>% pull(TF)
 tf_targets_list <- lapply(top_tfs, function(tf) {
   net_merged %>% filter(TF == tf) %>% arrange(desc(delta)) %>% pull(Gene)
 })
 names(tf_targets_list) <- top_tfs
-saveRDS(tf_targets_list, "results/tables/top_tf_target_sets.rds")
+saveRDS(tf_targets_list, file.path(er_tbl_dir, "top_tf_target_sets.rds"))
 
 # -------------------- GSEA/ORA on TF target sets --------------------
 go_term2gene <- go_sets %>% dplyr::select(gs_name, gene_symbol)
-tf_ora_results <- lapply(top_tfs, function(tf) {
-  tg <- tf_targets_list[[tf]]
-  enr <- clusterProfiler::enricher(
-    gene = tg,
-    TERM2GENE = go_term2gene,
-    minGSSize = 10,
-    pAdjustMethod = "BH",
-    qvalueCutoff = 0.05
-  )
-  if (!is.null(enr)) {
-    res <- as.data.frame(enr@result)
-    res$TF <- tf
-    res
-  } else {
-    NULL
+tf_ora_tbl <- tibble()
+if (length(top_tfs) > 0 && has_clusterProfiler) {
+  tf_ora_results <- lapply(top_tfs, function(tf) {
+    tg <- tf_targets_list[[tf]]
+    enr <- clusterProfiler::enricher(
+      gene = tg,
+      TERM2GENE = go_term2gene,
+      minGSSize = 10,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05
+    )
+    if (!is.null(enr)) {
+      res <- as.data.frame(enr@result)
+      res$TF <- tf
+      res
+    } else {
+      NULL
+    }
+  })
+  tf_ora_tbl <- dplyr::bind_rows(tf_ora_results)
+  if (nrow(tf_ora_tbl) > 0) {
+    readr::write_csv(tf_ora_tbl, file.path(er_tbl_dir, "tf_target_go_enrichment.csv"))
   }
-})
-tf_ora_tbl <- dplyr::bind_rows(tf_ora_results)
-if (nrow(tf_ora_tbl) > 0) {
-  readr::write_csv(tf_ora_tbl, "results/tables/tf_target_go_enrichment.csv")
+} else if (length(top_tfs) > 0 && !has_clusterProfiler) {
+  message("clusterProfiler not installed; skipping GO enrichment on TF target sets.")
+  readr::write_lines(
+    c(
+      "clusterProfiler is not installed; TF target GO enrichment skipped.",
+      "To enable, install clusterProfiler (internet required) then re-run script.",
+      paste0("Top TFs identified: ", paste(top_tfs, collapse = ", "))
+    ),
+    file.path(er_tbl_dir, "tf_target_go_enrichment_SKIPPED.txt")
+  )
 }
 
 # -------------------- Overlap comparison --------------------
@@ -298,15 +341,22 @@ if (nrow(tf_ora_tbl) > 0) {
   overlap <- tf_ora_tbl %>%
     filter(qvalue < 0.05) %>%
     mutate(in_de_gsea = gs_name %in% de_gsea_paths)
-  readr::write_csv(overlap, "results/tables/tf_target_go_overlap_with_de_gsea.csv")
+  readr::write_csv(overlap, file.path(er_tbl_dir, "tf_target_go_overlap_with_de_gsea.csv"))
 }
 
 # -------------------- Gene deep dive (example: ESR1) --------------------
-# ESR1 (Estrogen receptor 1) encodes a nuclear hormone receptor that mediates estrogen signaling;
-# it is the canonical driver of ER+ breast cancer and often amplified or overexpressed in this subtype.
-# ER+ tumors rely on ESR1 activity; mutations (e.g., Y537S, D538G) confer endocrine resistance.
-# To look up ESR1 on NCBI: visit https://www.ncbi.nlm.nih.gov/gene/2099
-# For UCSC Genome Browser track: open https://genome.ucsc.edu/, select hg38, search "ESR1",
-# then add a custom track with BED coordinates of ESR1 enhancers or ATAC-seq peaks to visualize context.
+deep_dive_gene <- "ESR1"
+deep_dive_notes <- c(
+  paste0("Gene deep dive target: ", deep_dive_gene),
+  "Biology: nuclear hormone receptor; canonical driver of ER+ breast cancer.",
+  "Common resistance mutations: Y537S, D538G; often amplified/overexpressed.",
+  "NCBI (manual): https://www.ncbi.nlm.nih.gov/gene/2099",
+  "UCSC (manual): https://genome.ucsc.edu/ -> hg38 -> search 'ESR1' -> add custom track (e.g., BED of enhancers or ATAC peaks).",
+  "Suggested track template:",
+  "track name=ESR1_enhancers type=bed visibility=3 color=200,0,0",
+  "chr6 151656691 151657200 ESR1_enhancer1",
+  "chr6 151660500 151661000 ESR1_enhancer2"
+)
+readr::write_lines(deep_dive_notes, file.path(er_tbl_dir, "gene_deep_dive_ESR1.txt"))
 
 sessionInfo()
