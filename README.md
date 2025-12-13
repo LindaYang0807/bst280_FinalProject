@@ -1,34 +1,30 @@
-# BST280 Final Project
+# BST280 Final Project: TCGA-BRCA ER+ vs ER- network analysis
 
-本项目提供 GTEx 乳腺（正常）与 TCGA BRCA（肿瘤）的探索性分析、差异表达与生存分析流水线。
+This repository contains a full RNA-seq workflow to compare estrogen receptor-positive (ERpos) versus estrogen receptor-negative (ERneg) TCGA BRCA tumors and to characterize subtype-specific transcriptional networks.
 
-## 内容概览
-- 数据：`data/gtex_breast.rds`（GTEx 正常乳腺），`data/tcga_brca.rds`（TCGA BRCA 肿瘤），均为 `RangedSummarizedExperiment`，包含 `raw_counts` 与 `logtpm`。
-- 脚本：`scripts/eda_gtex_tcga.R`，一键完成 EDA、差异表达、基础生存分析，结果输出到 `results/`。
-- 依赖：SummarizedExperiment、tidyverse、matrixStats、patchwork、survival。若安装了 limma/edgeR/sva 将自动使用 limma-voom 与可选 ComBat_seq；否则退化为 log-CPM + Welch t 检验（已在当前运行中触发）。
+## Data
+- Input: `data/tcga_brca.rds` (expected as a `SummarizedExperiment`, or a list containing a count matrix plus clinical metadata). The metadata must include `tcga.xml_breast_carcinoma_estrogen_receptor_status` to classify samples as ERpos/ERneg.
+- Output directories are created under `results/er_analysis/figures` and `results/er_analysis/tables`.
 
-运行：在仓库根目录执行 `Rscript scripts/eda_gtex_tcga.R`。
+## How to run
+From the repository root:
+```bash
+Rscript er_analysis_updated.R
+```
+- The script attempts to install required packages (`DESeq2`, `fgsea`, `msigdbr`, `org.Hs.eg.db`, `ggplot2`, `Rtsne`, etc.) and optional ones (`netZooR`, `apeglm`, `ashr`, `clusterProfiler`) if missing. First-time execution requires internet access for installation.
+- PANDA uses `netZooR` when available; otherwise it falls back to correlation-based weights.
+- To regenerate the narrative report, knit `Final_Project-copy.Rmd` (same pipeline with prose).
 
-## 主要步骤（脚本内部）
-1) 元数据汇总：性别、年龄、样本类型、分期、存活状态等，写入对应 CSV。
-2) 基因 ID 去版本号并合并重复，保留 GTEx/TCGA 交集。
-3) 质量分布：文库大小直方图、每样本中位数 logTPM 分布。
-4) PCA：共同基因的前 2,000 高变基因，查看 GTEx 正常 vs TCGA 肿瘤分离（`results/pzned.png`）。
-5) 差异表达：GTEx 正常 vs TCGA 肿瘤。
-   - 若有 limma/edgeR：limma-voom；否则使用 log-CPM + Welch t（当前运行）。
-   - 输出表 `results/de_limma_voom.csv`，火山图 `results/de_volcano.png`，MA 图 `results/de_MA.png`。
-6) 生存分析：
-   - 分期+年龄 Cox：`results/cox_stage_age.csv`；KM 分期曲线 `results/km_by_stage.png`。
-   - 顶 DE 基因（当前为 ENSG00000000003）的高低表达分组 Cox：`results/cox_top_gene.csv`；KM 曲线 `results/km_top_gene.png`。
-   - 生存输入表：`results/tcga_survival_ready.csv`。
+## Pipeline overview (er_analysis_updated.R)
+1) Load counts/metadata, align shared samples, and filter for clear ER status (Positive/Negative), recoding to `ERneg`/`ERpos`.
+2) Gene QC: strip Ensembl versions, drop duplicates, require counts >=10 in >=20% of samples, and remove genes lacking HGNC symbols.
+3) DESeq2 analysis: run with parallel workers (no outlier replacement), obtain VST-normalized matrix with symbol mapping.
+4) EDA: PCA on all genes and on top variable subsets (2k/500); t-SNE on top variable genes (2k/500).
+5) Differential expression (ERpos vs ERneg): LFC shrinkage via `apeglm` or `ashr` when available; significance requires `padj < 0.05` and `|log2FC| >= 1`. Exports diagnostics (MA plot, volcano, p-value histogram) and summary metrics.
+6) GSEA: `fgseaMultilevel` on GO Biological Process; saves full results, top 15 table, barplot, enrichment curves, leading-edge cilium genes, and per-sample cilium scores.
+7) PANDA networks: build TF-target prior from MSigDB C3 TFT sets (limited to expressed genes, capped at 5k genes), infer ERpos and ERneg networks via `netZooR` or correlation fallback.
+8) Differential targeting: compare ERpos vs ERneg edge weights, export TF-level deltas, top TF target sets, barplot of top 20 TFs, and a heatmap of top TF-target deltas.
 
-## 已生成的结果（当前运行）
-- 差异表达：`de_limma_voom.csv`（因缺少 limma/edgeR，使用 log-CPM + Welch t），`de_volcano.png`，`de_MA.png`。
-- 分期生存：`cox_stage_age.csv`，`km_by_stage.png`。
-- 顶基因生存：`cox_top_gene.csv`，`km_top_gene.png`。
-- 元数据计数/EDA：`gtex_sex_counts.csv`，`gtex_age_counts.csv`，`tcga_sample_type_counts.csv`，`tcga_stage_counts.csv`，`tcga_vital_counts.csv`，`tcga_survival_ready.csv`，以及基础分布图（文库大小、logTPM 中位数、PCA）。
-
-## 结果意义/后续可用性
-- 差异表达结果提供肿瘤 vs 正常的候选基因列表，可用于功能注释、通路富集或后续生物标志物筛选。
-- 生存分析给出分期与年龄的风险比，并用顶 DE 基因的表达高低分组展示潜在预后关联，可扩展到自定义基因或通路评分。
-- 脚本是可重复的一键流程：补装 limma/edgeR/sva 即可切换到更标准的 voom/ComBat_seq 流程；可根据需求替换或增加基因签名、分组变量、统计模型。
+## Key outputs
+- Figures (`results/er_analysis/figures`): PCA (`pca_vst_all.pdf`, `pca_vst_top2000.pdf`, `pca_vst_top500.pdf`), t-SNE (`tsne_tsne_top2000.pdf`, `tsne_tsne_top500.pdf`), DE plots (`volcano_erpos_vs_erneg.pdf`, `ma_plot_erpos_vs_erneg.pdf`, `pvalue_histogram.png`), GSEA (`fgsea_go_bp_top15.pdf`, `fgsea_go_bp_top15_plotEnrichment.pdf`), cilium score boxplot (`cilium_signature_score_boxplot.pdf`), differential targeting (`tf_differential_targeting_top20_bar.pdf`, `delta_topTFs_topTargets_heatmap.pdf`).
+- Tables/objects (`results/er_analysis/tables`): symbol map (`ensembl_to_symbol_map.tsv`), PCA/t-SNE coordinates, DE results (`deseq2_erpos_vs_erneg_full_shrunk.csv`, `deseq2_summary_metrics.csv`, `deseq2_diagnostics.txt`, `ranked_genes_stat.tsv`, DESeq2 objects), GSEA outputs (`fgsea_go_bp_erpos_vs_erneg.csv`, `fgsea_go_bp_top15_labeled.csv`, leading-edge/cilium files, cilium scores), PANDA networks (`panda_network_erpos.rds`, `panda_network_erneg.rds`), differential targeting summaries (`differential_targeting_tf.csv`, `top_tf_target_sets.rds`).
