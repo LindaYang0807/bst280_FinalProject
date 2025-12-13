@@ -1,0 +1,6 @@
+metric,value
+n_genes_total,22057
+n_sig,11814
+n_up,1305
+n_down,1930
+esr1_significant,TRUE

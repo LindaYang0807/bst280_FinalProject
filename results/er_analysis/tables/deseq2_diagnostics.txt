@@ -1,0 +1,6 @@
+DESeq2: total genes tested = 22057
+DESeq2: significant (padj_bonf < 0.05) = 11814
+DESeq2: upregulated in ERpos (padj_bonf < 0.05 & log2FC>1) = 1305
+DESeq2: downregulated in ERpos (padj_bonf < 0.05 & log2FC<-1) = 1930
+ESR1 significant (padj_bonf < 0.05) = TRUE
+Top genes (by padj_bonf): ESR1, C5AR2, CCDC170, TBC1D9, GATA3, THSD4, NAT1, MCF2L2, SLC39A6, TTLL4
