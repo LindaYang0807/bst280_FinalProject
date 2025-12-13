@@ -1,3 +1,7 @@
-data/gtex_breast.rds
-data/tcga_brca.rds
+data/
 data.zip
+results/er_analysis/figures/heatmap_sig_genes.pdf
+.Rproj.user
+.RDataTmp
+
+*.rds

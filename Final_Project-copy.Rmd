@@ -38,10 +38,12 @@ options(stringsAsFactors = FALSE)
 required_pkgs <- c(
   "DESeq2", "ggplot2", "ggrepel", "dplyr", "tibble", "readr", "tidyr",
   "pheatmap", "fgsea", "msigdbr", "org.Hs.eg.db", "AnnotationDbi", "dplyr",
-  "data.table", "BiocParallel", "matrixStats"
+  "data.table", "BiocParallel", "matrixStats", "Rtsne"
 )
 
-install_if_missing <- function(pkgs) {
+optional_pkgs <- c("netZooR", "apeglm", "ashr", "clusterProfiler")
+
+install_if_missing <- function(pkgs, stop_on_fail = TRUE) {
   for (p in pkgs) {
     if (!requireNamespace(p, quietly = TRUE)) {
       message("Package ", p, " not found; attempting install (requires internet).")
@@ -50,15 +52,35 @@ install_if_missing <- function(pkgs) {
           install.packages("BiocManager", repos = "https://cloud.r-project.org")
         }
         BiocManager::install(p, ask = FALSE, update = FALSE)
+        if (!requireNamespace(p, quietly = TRUE) && identical(p, "netZooR")) {
+          # Bioc release may not yet have netZooR for this R/Bioc version; try GitHub
+          message("netZooR not found in current Bioconductor release; trying GitHub netZoo/netZooR.")
+          if (!requireNamespace("remotes", quietly = TRUE)) {
+            install.packages("remotes", repos = "https://cloud.r-project.org")
+          }
+          remotes::install_github("netZoo/netZooR", upgrade = "never", dependencies = FALSE)
+        }
       }, error = function(e) {
-        stop("Package ", p, " is required but could not be installed automatically. ",
-             "Install it manually (internet needed) and re-run. Details: ", e$message)
+        if (stop_on_fail) {
+          stop("Package ", p, " is required but could not be installed automatically. ",
+               "Install it manually (internet needed) and re-run. Details: ", e$message)
+        } else {
+          warning("Optional package ", p, " could not be installed automatically. ",
+                  "Falling back to no-", p, " mode. Details: ", e$message)
+        }
       })
     }
-    library(p, character.only = TRUE)
+    if (requireNamespace(p, quietly = TRUE)) {
+      library(p, character.only = TRUE)
+    } else if (stop_on_fail) {
+      stop("Package ", p, " is required but still not available after install attempt.")
+    } else {
+      message("Skipping attach for optional package ", p, " (not available).")
+    }
   }
 }
 install_if_missing(required_pkgs)
+install_if_missing(optional_pkgs, stop_on_fail = FALSE)
 
 has_netZooR <- requireNamespace("netZooR", quietly = TRUE)
 if (!has_netZooR) {
@@ -109,7 +131,7 @@ To ensure valid downstream analysis, the code aligned samples across expression 
 ```{r}
 
 # -------------------- Load data --------------------
-obj <- readRDS("tcga_brca.rds")
+obj <- readRDS(file.path("data", "tcga_brca.rds"))
 
 if (inherits(obj, "SummarizedExperiment")) {
   expr_mat <- as.matrix(SummarizedExperiment::assay(obj))
@@ -215,10 +237,8 @@ if (nrow(expr_filt) == 0) {
 
 ```
 
-#### 5. EDA: PCA and Clustering across All Genes
-Principal component analysis (PCA) was applied to the vst-normalized expression matrix to visualize global transcriptional differences between ER groups. Samples were projected onto the first two principal components, and ER status was overlaid as a grouping variable.
-
-Unsupervised clustering was conducted using both k-means clustering (k = 2) and hierarchical clustering (Ward.D2 linkage). Contingency tables comparing cluster assignments versus ER labels were generated to assess natural separation between ER subtypes. Hierarchical clustering dendrograms were also exported for visualization.
+#### 5. EDA: PCA and t-SNE on variable-gene subsets
+Principal component analysis (PCA) and t-SNE were applied to the VST-normalized matrix to visualize separation of ER groups. Plots are generated for all genes and the top variable subsets (2,000 and 500 genes), with ER-specific colors/labels for readability.
 
 ```{r}
 
@@ -265,57 +285,155 @@ symbol_map_df <- data.frame(
 )
 readr::write_tsv(symbol_map_df, file.path(er_tbl_dir, "ensembl_to_symbol_map.tsv"))
 
-# -------------------- PCA and clustering (all genes and variable-gene subsets) --------------------
+# -------------------- PCA + t-SNE (replacement block) --------------------
+# Assumes you already have:
+#   norm_mat_sym  (genes x samples, VST normalized, rownames = gene symbols)
+#   meta          (rows = samples, meta$ER_status factor with levels c("ERneg","ERpos"))
+#   er_fig_dir, er_tbl_dir already defined
 
-# Helper: compute PCA, save coordinates, and create clearer ggplot output
+# (Optional) for t-SNE
+if (!requireNamespace("Rtsne", quietly = TRUE)) {
+  stop("Package 'Rtsne' is required for t-SNE. Install it via: install.packages('Rtsne')")
+}
+
+# Pretty labels & palette
+meta$ER_label <- factor(
+  meta$ER_status,
+  levels = c("ERneg", "ERpos"),
+  labels = c("ER−", "ER+")
+)
+
+er_pal <- c("ER−" = "#E76F51", "ER+" = "#2A9D8F")
+
+# Helper: pick top variable genes
+select_top_var_genes <- function(mat, top_n = 2000) {
+  if (is.na(top_n) || top_n <= 0 || nrow(mat) <= top_n) return(mat)
+  v <- matrixStats::rowVars(mat, na.rm = TRUE)
+  idx <- order(v, decreasing = TRUE)[seq_len(min(top_n, length(v)))]
+  mat[idx, , drop = FALSE]
+}
+
+# -------------------- PCA --------------------
 make_pca_plot <- function(mat, meta, prefix = "pca", top_n = NA) {
-  if (!is.na(top_n)) {
-    if (nrow(mat) <= top_n) {
-      mat_use <- mat
-      sel_name <- paste0(prefix, "_top", nrow(mat))
-    } else {
-      v <- matrixStats::rowVars(mat, na.rm = TRUE)
-      ord <- order(v, decreasing = TRUE)
-      idx <- ord[seq_len(min(top_n, length(v)))]
-      mat_use <- mat[idx, , drop = FALSE]
-      sel_name <- paste0(prefix, "_top", top_n)
-    }
-  } else {
-    mat_use <- mat
-    sel_name <- paste0(prefix, "_all")
-  }
-
+  mat_use <- if (is.na(top_n)) mat else select_top_var_genes(mat, top_n = top_n)
+  tag <- if (is.na(top_n)) paste0(prefix, "_all") else paste0(prefix, "_top", top_n)
+  
   if (nrow(mat_use) < 3 || ncol(mat_use) < 3) {
-    message("Skipping PCA for ", sel_name, ": too few genes/samples.")
+    message("Skipping PCA for ", tag, ": too few genes/samples.")
     return(invisible(NULL))
   }
-
-  pca_res <- tryCatch(prcomp(t(mat_use), scale. = TRUE), error = function(e) { message("PCA error: ", e$message); NULL })
-  if (is.null(pca_res)) return(invisible(NULL))
-
-  var_exp <- (pca_res$sdev^2) / sum(pca_res$sdev^2)
-  pca_df <- data.frame(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2], ER_status = meta$ER_status, sample = rownames(pca_res$x), stringsAsFactors = FALSE)
-
-  # Save coordinates for later inspection
-  readr::write_tsv(pca_df, file.path(er_tbl_dir, paste0("pca_coords_", sel_name, ".tsv")))
-
-  p <- ggplot(pca_df, aes(PC1, PC2, color = ER_status, label = sample)) +
-    geom_point(size = 3, alpha = 0.9) +
-    geom_text(check_overlap = TRUE, vjust = 1.5, size = 2) +
-    stat_ellipse(aes(color = ER_status), level = 0.68, linetype = 2, size = 0.6, show.legend = FALSE) +
-    theme_bw() +
-    labs(title = paste0("PCA (", sel_name, ")"),
-         x = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)"),
-         y = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)"))
-
-  ggsave(file.path(er_fig_dir, paste0("pca_", sel_name, ".pdf")), p, width = 6, height = 5)
+  
+  pca <- prcomp(t(mat_use), center = TRUE, scale. = TRUE)
+  var_exp <- (pca$sdev^2) / sum(pca$sdev^2)
+  
+  df <- data.frame(
+    sample = rownames(pca$x),
+    PC1 = pca$x[, 1],
+    PC2 = pca$x[, 2],
+    ER_label = meta$ER_label[match(rownames(pca$x), rownames(meta))],
+    stringsAsFactors = FALSE
+  )
+  
+  # Save coordinates
+  readr::write_tsv(df, file.path(er_tbl_dir, paste0("pca_coords_", tag, ".tsv")))
+  
+  p <- ggplot(df, aes(PC1, PC2, color = ER_label)) +
+    geom_point(size = 1.4, alpha = 0.75) +
+    stat_ellipse(level = 0.68, linewidth = 0.5, linetype = 2, show.legend = FALSE) +
+    scale_color_manual(values = er_pal) +
+    labs(
+      title = paste0("PCA (", tag, ")"),
+      x = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)"),
+      y = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)"),
+      color = "Estrogen receptor status"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.title = element_text(face = "bold"),
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(er_fig_dir, paste0("pca_", tag, ".pdf")), p, width = 6.2, height = 5.2, useDingbats = FALSE)
   invisible(p)
 }
 
-# Produce PCA plots for: all genes, top 2000 most variable, and top 500 most variable genes
+# Generate PCA plots: all genes, top 2000, top 500
 make_pca_plot(norm_mat_sym, meta, prefix = "vst", top_n = NA)
 make_pca_plot(norm_mat_sym, meta, prefix = "vst", top_n = 2000)
 make_pca_plot(norm_mat_sym, meta, prefix = "vst", top_n = 500)
+
+
+# -------------------- t-SNE --------------------
+make_tsne_plot <- function(mat, meta, prefix = "tsne", top_n = 2000, perplexity = NULL) {
+  mat_use <- select_top_var_genes(mat, top_n = top_n)
+  tag <- paste0(prefix, "_top", top_n)
+  
+  if (nrow(mat_use) < 10 || ncol(mat_use) < 10) {
+    message("Skipping t-SNE for ", tag, ": too few genes/samples.")
+    return(invisible(NULL))
+  }
+  
+  X <- scale(t(mat_use))  # samples x genes
+  
+  n <- nrow(X)
+  if (is.null(perplexity)) {
+    # safe default; t-SNE requires perplexity < (n-1)/3
+    perplexity <- min(30, floor((n - 1) / 3))
+    perplexity <- max(5, perplexity)
+  } else {
+    perplexity <- min(perplexity, floor((n - 1) / 3))
+    perplexity <- max(5, perplexity)
+  }
+  
+  set.seed(20250219)
+  ts <- Rtsne::Rtsne(
+    X,
+    dims = 2,
+    perplexity = perplexity,
+    theta = 0.5,
+    pca = TRUE,
+    check_duplicates = FALSE,
+    max_iter = 2000,
+    verbose = FALSE
+  )
+  
+  df <- data.frame(
+    sample = rownames(X),
+    tSNE1 = ts$Y[, 1],
+    tSNE2 = ts$Y[, 2],
+    ER_label = meta$ER_label[match(rownames(X), rownames(meta))],
+    stringsAsFactors = FALSE
+  )
+  
+  # Save coordinates
+  readr::write_tsv(df, file.path(er_tbl_dir, paste0("tsne_coords_", tag, ".tsv")))
+  
+  p <- ggplot(df, aes(tSNE1, tSNE2, color = ER_label)) +
+    geom_point(size = 1.4, alpha = 0.75) +
+    scale_color_manual(values = er_pal) +
+    labs(
+      title = paste0("t-SNE (", tag, "; perplexity=", perplexity, ")"),
+      x = "t-SNE1",
+      y = "t-SNE2",
+      color = "Estrogen receptor status"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.title = element_text(face = "bold"),
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+  
+  ggsave(file.path(er_fig_dir, paste0("tsne_", tag, ".pdf")), p, width = 6.2, height = 5.2, useDingbats = FALSE)
+  invisible(p)
+}
+
+# Generate t-SNE plots (recommended to use variable genes)
+make_tsne_plot(norm_mat_sym, meta, prefix = "tsne", top_n = 2000)
+make_tsne_plot(norm_mat_sym, meta, prefix = "tsne", top_n = 500)
 
 ```
 
@@ -522,85 +640,253 @@ ggsave(file.path(er_fig_dir, "volcano_erpos_vs_erneg.pdf"), p_volcano, width = 6
 ```
 
 #### 8. Gene Set Enrichment Analysis (GSEA)
-A preranked GSEA was performed using fgsea, applying DESeq2 Wald statistics as the ranking metric. Gene-level statistics were ordered decreasingly and passed to GO Biological Process (<GO:BP>) gene sets retrieved through msigdbr.
-
-fgsea was run using 2000 permutations to evaluate pathway-level enrichment. Adjusted p-values were computed, and results were sorted and exported. This analysis identifies biological processes disproportionately activated in ERpos or ERneg tumors.
+Preranked GSEA used DESeq2 Wald statistics with fgseaMultilevel for stability. GO:BP sets were filtered to moderate sizes (15–500 genes), top pathways were label-wrapped for readability, and leading-edge genes for the top cilium pathway were summarized (gene list, DE table, signature score with boxplot).
 
 ```{r}
 
 
-# -------------------- GSEA (GO BP) --------------------
+# -------------------- GSEA (GO BP) [REPLACEMENT BLOCK] --------------------
+# Goals:
+# 1) more stable inference: fgseaMultilevel (no nperm sensitivity)
+# 2) reduce GO:BP noise: min/max gene set size
+# 3) better plots: wrapped labels, no clipping, bigger canvas
+# 4) still export full table + top15 + multi-page enrichment curves
+
+# ranked list: named numeric vector (gene -> stat), decreasing
 gene_ranks <- ranked_genes %>%
   dplyr::select(gene, stat) %>%
   tibble::deframe()
+
 gene_ranks <- gene_ranks[!is.na(gene_ranks)]
 gene_ranks <- sort(gene_ranks, decreasing = TRUE)
 
+# GO:BP gene sets
 go_sets <- msigdbr::msigdbr(
   species = "Homo sapiens",
   category = "C5",
   subcategory = "GO:BP"
 ) %>%
-  dplyr::select(gs_name, gene_symbol)
+  dplyr::select(gs_name, gene_symbol) %>%
+  dplyr::filter(!is.na(gene_symbol) & gene_symbol != "")
+
 go_list <- split(go_sets$gene_symbol, go_sets$gs_name)
-fgsea_res <- fgsea::fgsea(pathways = go_list, stats = gene_ranks, nperm = fgsea_nperm)
+
+# optional: keep pathways within reasonable size range (prevents giant vague GO terms dominating)
+gsea_min_size <- 15
+gsea_max_size <- 500
+go_list <- go_list[lengths(go_list) >= gsea_min_size & lengths(go_list) <= gsea_max_size]
+
+# run fgsea (multilevel is recommended; more stable than fixed nperm)
+fgsea_res <- fgsea::fgseaMultilevel(
+  pathways = go_list,
+  stats = gene_ranks,
+  minSize = gsea_min_size,
+  maxSize = gsea_max_size
+)
+
 fgsea_tbl <- fgsea_res %>%
-  arrange(padj) %>%
-  as_tibble()
+  dplyr::arrange(padj) %>%
+  tibble::as_tibble()
+
 readr::write_csv(fgsea_tbl, file.path(er_tbl_dir, "fgsea_go_bp_erpos_vs_erneg.csv"))
-fgsea_top15 <- fgsea_tbl %>%
-  filter(!is.na(padj)) %>%
-  slice_head(n = 15) %>%
-  mutate(
-    rank = dplyr::row_number(),
-    pathway_label = paste0(rank, ". ", pathway)
+
+
+# -------------------- Explain top GO term: Cilium signature (leading-edge) --------------------
+# Outputs:
+# 1) leading-edge gene list (tsv)
+# 2) leading-edge DE table (csv)
+# 3) per-sample cilium score (tsv)
+# 4) boxplot PDF
+
+term <- "GOBP_CILIUM_ORGANIZATION"
+
+if (!("leadingEdge" %in% colnames(fgsea_tbl))) {
+  message("No leadingEdge column found in fgsea_tbl; skip cilium explanation block.")
+} else if (!(term %in% fgsea_tbl$pathway)) {
+  message("Term not found in fgsea_tbl: ", term)
+} else {
+  
+  # 1) get leading-edge genes
+  le <- fgsea_tbl %>%
+    dplyr::filter(pathway == term) %>%
+    dplyr::pull(leadingEdge)
+  
+  leading_genes <- unique(le[[1]])
+  message("Leading-edge genes for ", term, ": ", length(leading_genes))
+  
+  # save leading-edge gene list
+  readr::write_tsv(
+    tibble::tibble(gene = leading_genes),
+    file.path(er_tbl_dir, "leadingEdge_GOBP_CILIUM_ORGANIZATION_genes.tsv")
   )
+  
+  # 2) merge with DE results (log2FC + padj) for interpretation
+  le_de <- tibble::tibble(gene = leading_genes) %>%
+    dplyr::left_join(
+      res_tbl %>% dplyr::select(gene, log2FoldChange, padj),
+      by = "gene"
+    ) %>%
+    dplyr::arrange(dplyr::desc(log2FoldChange))
+  
+  readr::write_csv(
+    le_de,
+    file.path(er_tbl_dir, "leadingEdge_GOBP_CILIUM_ORGANIZATION_DE_table.csv")
+  )
+  
+  # 3) check "classic cilium family" hits (optional diagnostic)
+  hits <- leading_genes[grepl("^(DNAH|IFT|CFAP|KIF|DYNC|SPAG|TEKT|TTC|CCDC)", leading_genes)]
+  readr::write_tsv(
+    tibble::tibble(gene = hits),
+    file.path(er_tbl_dir, "leadingEdge_cilium_family_hits.tsv")
+  )
+  message("Cilium-family keyword hits: ", length(hits))
+  
+  # 4) per-sample cilium signature score (mean gene-wise z-scored VST)
+  stopifnot(all(colnames(norm_mat_sym) %in% rownames(meta)))
+  common <- intersect(leading_genes, rownames(norm_mat_sym))
+  if (length(common) < 10) {
+    message("Too few leading-edge genes found in norm_mat_sym (", length(common), "); skip scoring.")
+  } else {
+    X <- norm_mat_sym[common, , drop = FALSE]
+    Xz <- t(scale(t(X)))                 # z-score each gene across samples
+    cilium_score <- colMeans(Xz, na.rm = TRUE)
+    
+    meta$cilium_score <- cilium_score[rownames(meta)]
+    
+    # save per-sample score
+    score_df <- tibble::tibble(
+      sample = rownames(meta),
+      ER_status = meta$ER_status,
+      cilium_score = meta$cilium_score
+    )
+    readr::write_tsv(score_df, file.path(er_tbl_dir, "cilium_signature_score_per_sample.tsv"))
+    
+    # stats
+    wtest <- wilcox.test(cilium_score ~ meta$ER_status)
+    message("Wilcoxon p-value for cilium_score ~ ER_status: ", format.pval(wtest$p.value, digits = 3))
+    
+    # plot
+    p1 <- ggplot(meta, aes(x = ER_status, y = cilium_score)) +
+      geom_boxplot(outlier.shape = NA) +
+      geom_jitter(width = 0.15, alpha = 0.45, size = 1.2) +
+      theme_bw(base_size = 12) +
+      labs(
+        title = "Cilium signature score (leading-edge genes)",
+        subtitle = paste0("Term: ", term, " | leading-edge n=", length(common),
+                          " | Wilcoxon p=", format.pval(wtest$p.value, digits = 3)),
+        x = "ER_status",
+        y = "Mean z-scored VST"
+      )
+    
+    ggsave(
+      file.path(er_fig_dir, "cilium_signature_score_boxplot.pdf"),
+      p1,
+      width = 6.2,
+      height = 4.6,
+      useDingbats = FALSE
+    )
+  }
+}
+
+# ---- Plotting helpers (prevent cut-off) ----
+fmt_gobp <- function(x, width = 40) {
+  x <- sub("^GOBP_", "", x)
+  x <- gsub("_", " ", x)
+  vapply(
+    strwrap(x, width = width),
+    FUN = function(lines) paste(lines, collapse = "\n"),
+    FUN.VALUE = character(1)
+  )
+}
+
+# pick top 15 by padj (FDR)
+# helper: one-pathway-in, one-string-out (robust)
+fmt_gobp_one <- function(x, width = 40) {
+  x <- as.character(x)[1]
+  x <- sub("^GOBP_", "", x)
+  x <- gsub("_", " ", x)
+  paste(strwrap(x, width = width), collapse = "\n")
+}
+
+fgsea_top15 <- fgsea_tbl %>%
+  dplyr::filter(!is.na(padj)) %>%
+  dplyr::slice_head(n = 15) %>%
+  dplyr::mutate(rank = dplyr::row_number()) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    pathway_pretty = fmt_gobp_one(pathway, width = 40),
+    pathway_label  = paste0(rank, ". ", pathway_pretty)
+  ) %>%
+  dplyr::ungroup()
+
 if (nrow(fgsea_top15) > 0) {
   readr::write_csv(fgsea_top15, file.path(er_tbl_dir, "fgsea_go_bp_top15_labeled.csv"))
+  
+  # barplot (wrapped labels, no clipping, bigger canvas)
   fgsea_top15_plot <- fgsea_top15 %>%
-    mutate(pathway_label = factor(pathway_label, levels = rev(pathway_label)))
+    dplyr::mutate(pathway_label = factor(pathway_label, levels = rev(pathway_label)))
+  
   p_fgsea_top15 <- ggplot(fgsea_top15_plot, aes(x = pathway_label, y = NES, fill = NES)) +
-    geom_col() +
-    coord_flip() +
+    geom_col(width = 0.75) +
+    coord_flip(clip = "off") +
     scale_fill_gradient2(low = "royalblue3", mid = "grey90", high = "firebrick", midpoint = 0) +
     labs(
-      title = "Top 15 GO BP pathways (fgsea)",
+      title = "Top 15 GO Biological Process (fgseaMultilevel)",
+      subtitle = "Ranked by FDR (padj); NES>0 enriched toward high-stat end, NES<0 toward low-stat end",
       x = NULL,
-      y = "Normalized Enrichment Score (NES)"
+      y = "Normalized Enrichment Score (NES)",
+      fill = "NES"
     ) +
-    theme_bw() +
+    theme_bw(base_size = 12) +
     theme(
-      legend.position = "right",
-      axis.text.y = element_text(size = 8)
+      plot.title = element_text(face = "bold"),
+      legend.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_text(size = 8, hjust = 1),
+      plot.margin = margin(t = 8, r = 30, b = 8, l = 8)
     )
+  
   ggsave(
     filename = file.path(er_fig_dir, "fgsea_go_bp_top15.pdf"),
     plot = p_fgsea_top15,
-    width = 7,
-    height = 5,
+    width = 10, height = 6,
+    limitsize = FALSE,
     useDingbats = FALSE
   )
+  
+  # multi-page enrichment curves for these top15 pathways
   enrich_pdf <- file.path(er_fig_dir, "fgsea_go_bp_top15_plotEnrichment.pdf")
   pdf_open <- FALSE
   tryCatch({
-    grDevices::pdf(enrich_pdf, width = 6, height = 4, useDingbats = FALSE)
+    grDevices::pdf(enrich_pdf, width = 7, height = 4.5, useDingbats = FALSE)
     pdf_open <- TRUE
+    
     for (i in seq_len(nrow(fgsea_top15))) {
       path <- fgsea_top15$pathway[i]
       if (!path %in% names(go_list)) next
-      label <- fgsea_top15$pathway_label[i]
+      
+      # shorter title for the curve page
+      title_txt <- paste0(
+        fgsea_top15$rank[i], ". ",
+        sub("^GOBP_", "", gsub("_", " ", path))
+      )
+      
       p_enrich <- fgsea::plotEnrichment(go_list[[path]], gene_ranks) +
-        ggtitle(label)
+        ggtitle(title_txt) +
+        theme_bw(base_size = 11) +
+        theme(plot.title = element_text(face = "bold", size = 10))
+      
       print(p_enrich)
     }
+    
     grDevices::dev.off()
     pdf_open <- FALSE
   }, error = function(e) {
-    if (pdf_open && grDevices::dev.cur() > 1) {
-      grDevices::dev.off()
-    }
+    if (pdf_open && grDevices::dev.cur() > 1) grDevices::dev.off()
     warning("Failed to save fgsea plotEnrichment PDF: ", e$message)
   })
+} else {
+  message("No valid fgsea pathways with non-NA padj for top15 plotting.")
 }
 
 
@@ -773,7 +1059,7 @@ saveRDS(net_erneg, file.path(er_tbl_dir, "panda_network_erneg.rds"))
 #### 10. Differrential Targeting Analysis
 To quantify subtype-specific regulatory rewiring, PANDA network edge weights from ER-positive and ER-negative samples were merged by shared TF–gene pairs. A differential targeting score was calculated for each edge (delta = Weight_pos − Weight_neg), representing the change in inferred regulatory strength between conditions.
 
-For each transcription factor, summary metrics including the mean delta, median delta, and number of target genes were computed. TFs were ranked by the absolute mean delta to identify regulators exhibiting the strongest shifts in regulatory influence between ER subtypes. The top 20 TFs were visualized using a bar plot, and the top five TFs were further examined by selecting their most differentially targeted genes. These TF–target delta values were displayed using a heatmap to highlight patterns of regulatory gain or loss across ER-positive and ER-negative tumors.
+For each transcription factor, summary metrics including the mean delta, median delta, and number of target genes were computed. TFs were ranked by the absolute mean delta to identify regulators exhibiting the strongest shifts in regulatory influence between ER subtypes. The top 20 TFs were visualized using a bar plot, and the top TFs (n = 15) were further examined by selecting their most differentially targeted genes. These TF–target delta values were displayed using a heatmap to highlight patterns of regulatory gain or loss across ER-positive and ER-negative tumors.
 ```{r}
 
 # -------------------- Differential targeting --------------------
@@ -879,5 +1165,3 @@ if (nrow(delta_mat) > 1 && ncol(delta_mat) > 1) {
 
 
 ```
-
-
