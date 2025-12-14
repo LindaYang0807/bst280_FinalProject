@@ -240,6 +240,7 @@ if (nrow(expr_filt) == 0) {
 #### 5. EDA: PCA and t-SNE on variable-gene subsets
 Principal component analysis (PCA) and t-SNE were applied to the VST-normalized matrix to visualize separation of ER groups. Plots are generated for all genes and the top variable subsets (2,000 and 500 genes), with ER-specific colors/labels for readability.
 
+
 ```{r}
 
 # -------------------- DESeq2 setup & normalization --------------------
@@ -1160,8 +1161,48 @@ if (nrow(delta_mat) > 1 && ncol(delta_mat) > 1) {
   )
 }
 
-
-
-
-
 ```
+
+### Results
+#### Sample Composition, Filtering Outcomes, and Global Expression Structure 
+Exploratory data analysis with PCA of VST RNA-seq gene expressions data from breast cancer samples, colored by estrogen receptor (ER) status. Data were transformed using VST and PC1 and PC2 captured the largest sources of variation in gene expression. Together, PC1 and PC2 explained 17.9% of the total variance. We see that ER+ and ER− samples overlap substantially.
+
+As shown in the plot, ER+ samples (green) clustered mainly in the lower half of the plot, while ER- samples (pink) clustered mainly in the upper half. This indicates that ER status is a major driver of gene expression differences. However, it is not the dominant source of variation.
+
+Next, we looked at the 2000 genes that vary the most across all samples since highly variable genes are more likely to reflect biological differences. Looking at PCA for the top 2000, there is a cleaner separation between ER+/ER-. ER+ clusters on the right, while ER- clusters on the left. ER status now explains a greater fraction of variation (PC1: 15.8% and PC2: 8.3%). This suggests ER+ and ER- tumors may have different transcription programs. 
+
+Finally, we further restricted the genes to the top 500. This plot has the cleanest cluster separation, and PC1 captures nearly a quarter of total variance. The results suggest the most variable genes are highly informative of ER status, indicating a strong molecular difference between ER+ and ER− tumors. 
+
+t-SNE is a non-parametric dimension reduction technique we used alongside PCA to visualize which samples are similar in gene expression. Looking at the top 2000 variable genes, we see that samples sample tightly together based on ER status. There is a small cluster of ER- samples on top of a larger cluster of ER+ samples. There is a clear distinction between the clusters. However, there is a small cluster of ER- samples that is separated from the main cluster and is closer to the ER+ cluster. 
+
+The t-SNE graph for the top 500 variable genes is further separated into two clusters. On the right is a large ER+ cluster, and on the left is a tiny ER- cluster.  
+
+Overall, by filtering for top variable genes, we find evidence that ER status drives gene expression differences. After confirming systematic differences, we can proceed with DESeq2. 
+
+#### Differential Gene Expression Between ER+ and ER− Tumors
+The MA plot provides an overview of the overall gene expression changes across the transcriptome. On the Y-axis, positive M (top) indicates genes that are upregulated in ER+ breast cancer, while negative M (bottom) indicates genes that are upregulated in ER- breast cancer (and downregulated in ER+ breast cancer). M=0, the center line indicates genes that have no change in expression. Meanwhile, on the X axis, larger values refer to genes that have high average expression across both ER+ and ER- breast cancers. Smaller values refer to genes that have lower average expression across both conditions. The MA plot visually confirms the evidence of genomic differences between ER+ and ER- breast cancer.
+
+The bar plot compares the top differentially targeted TFs between ER+ and ER- breast cancer. As can be seen, ER+ and ER- breast cancers exhibit distinct differentially targeted TFs, once again confirming previous findings on the genomic differences between these 2 subtypes of breast cancer.
+
+The volcano plot confirms that ER+ and ER- subtypes are separated by several highly significant differentially expressed genes. Notably, ESR1 is the dominant upregulated gene in ER+ breast cancer. Meanwhile, genes such as MCF2L2 and TTLL4 are the most upregulated in ER- breast cancer. 
+
+#### Functional Pathway Differences Identified by GSEA
+The boxplot shows a gene-set signature activity comparison between ER- and ER+ breast cancer, specifically for cilium organization, which is important for cell signaling. 162 genes most strongly drove enrichment in GSEA. ER- tumors had significantly lower cilium signature activity compared to ER+ tumors (Wilcoxon p value <0.05). In the biological context, this can be understood that the loss of cilium organization is associated with ER- breast cancer. 
+
+The figure of GSEA of the top 15 GO biological processes shows differences in expression between ER+ and ER- breast cancer. Positive normalized enrichment scores (NES) indicate that genes in the set are upregulated while negative NES indicate that the genes in the set are generally downregulated. Positive NES represents gene sets enriched in ER+ breast cancer, while negative NES represents gene sets enriched in ER- breast cancer. Evidently, ER+ and ER- exhibit distinct enrichment of certain biological processes. This connects to the volcano plot in differential gene expression analysis as the cilium organization pathway is driven by the collective upregulation of many genes in the genes upregulated in ER breast cancer.  
+
+The enrichment plot delves deeper into the five top-ranked enrichment pathways from fgsea_go_bp_top15.pdf. 
+
+The green lines, enrichment scores, for several enrichment pathways (cilium organization, microtubule based movement, axoneme assembly, cilium movement, rise rapidly at the near the left side of the plot (rank 0 to ~5000). This indicates that genes in all of these pathways are the most highly expressed genes in ER+ breast cancer. Biologically, the genes for cilium and microtubule functions are among the most upregulated genes in ER+ breast cancers. Meanwhile, the plot for chromosome segregation shows a peak on the right side of the plot (rank ~17000-20000), indicating that genes for chromosome segregation are among the most upregulated genes in ER- breast cancer. Connecting to other plots, such as the volcano plot in differential gene expression analysis, the high expression of genes such as ESR1 lead to the activation of pathways centered around cilium and microtubule movement in ER+ breast cancer while the expression of genes in the microenvironment (e.g. MCF2L2) are involved in activating pathways related to cell cycle, DNA replication, and chromosome segregation in ER-negative breast cancer.
+
+
+#### ER-Specific Transcriptional Network Inference Using PANDA
+
+#### Differential Targeting Reveals Regulatory Rewiring Between ER Subtypes
+The differential targeting heat map illustrates regulatory differences between ER− and ER+ breast cancers for key transcription factors (TFs) and their target genes. Positive values (red/orange) indicate stronger TF targeting in ER− tumors. Negative values (blue) indicate stronger targeting in ER+ tumors. In addition, red/orange reflects a gain in regulatory influence by a TF over a given target, while blue reflects a loss of influence. Although most TF–target interactions show only modest changes, as indicated by pale coloring, some interactions stand out. For example, FOXC1 exhibits strong positive delta targeting across multiple targets, suggesting that FOXC1 acts as a major regulatory driver in ER− tumors.
+
+
+#### Discussion
+From our analysis, we find that gene expression programs and TF-mediated regulatory networks vary across ER+ and ER- breast cancer subtypes. For transcriptional programs, ER+ tumors upregulate ESR1 and cilium/microtubule pathways, while ER− tumors upregulate genes like MCF2L2 and TTLL4. For regulatory network structures, transcription factors show modest changes. However, some genes like FOXC1 show strong positive delta targeting. Overall, these findings highlight that ER+ and ER- breast cancers show distinct transcriptional, functional, and regulatory programs. Breast cancer is not one dimensional and there is no one-size-fit-all treatment. By understanding ER status, we can better learn tumor behavior and guide more precise, tailored treatments.
+
+
