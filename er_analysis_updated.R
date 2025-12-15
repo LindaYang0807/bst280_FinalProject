@@ -9,7 +9,8 @@ options(stringsAsFactors = FALSE)
 required_pkgs <- c(
   "DESeq2", "ggplot2", "ggrepel", "dplyr", "tibble", "readr", "tidyr",
   "pheatmap", "fgsea", "msigdbr", "org.Hs.eg.db", "AnnotationDbi", "dplyr",
-  "data.table", "BiocParallel", "matrixStats", "Rtsne"
+  "data.table", "BiocParallel", "matrixStats", "Rtsne",
+  "ggraph", "tidygraph", "igraph"
 )
 optional_pkgs <- c("netZooR", "apeglm", "ashr", "clusterProfiler")
 
@@ -836,6 +837,55 @@ expr_by_status <- list(
   ERneg = norm_mat_sym[, meta$ER_status == "ERneg", drop = FALSE]
 )
 
+plot_panda_network <- function(net_df, status_label, top_edges = 200) {
+  if (!requireNamespace("ggraph", quietly = TRUE) ||
+      !requireNamespace("tidygraph", quietly = TRUE)) {
+    warning("ggraph/tidygraph not available; skipping PANDA plotting for ", status_label)
+    return(NULL)
+  }
+  if (nrow(net_df) == 0) return(NULL)
+
+  net_use <- net_df %>%
+    filter(!is.na(Weight)) %>%
+    arrange(desc(abs(Weight))) %>%
+    slice_head(n = top_edges)
+
+  if (nrow(net_use) == 0) return(NULL)
+
+  edges <- net_use %>%
+    transmute(from = TF, to = Gene, Weight = Weight)
+  tf_nodes <- unique(edges$from)
+
+  g <- tidygraph::as_tbl_graph(edges, directed = TRUE) %>%
+    tidygraph::mutate(node_type = ifelse(name %in% tf_nodes, "TF", "Target"))
+
+  ggraph::ggraph(g, layout = "fr") +
+    ggraph::geom_edge_link(
+      aes(edge_width = abs(Weight), edge_colour = Weight),
+      alpha = 0.45
+    ) +
+    scale_edge_width(range = c(0.2, 2.5), guide = "none") +
+    scale_edge_colour_gradient2(
+      low = "#2c7bb6",
+      mid = "grey80",
+      high = "#d7191c",
+      midpoint = 0,
+      name = "Edge weight"
+    ) +
+    ggraph::geom_node_point(aes(color = node_type), size = 3) +
+    ggraph::geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+    scale_color_manual(values = c(TF = "#1f78b4", Target = "#33a02c"), name = "Node type") +
+    labs(
+      title = paste0("PANDA network (", status_label, ")"),
+      subtitle = paste0("Top ", min(top_edges, nrow(net_use)), " edges by |weight|")
+    ) +
+    theme_void() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10)
+    )
+}
+
 panda_step_records <- list()
 panda_networks <- list()
 
@@ -962,6 +1012,19 @@ if (is.null(net_erneg)) {
 
 saveRDS(net_erpos, file.path(er_tbl_dir, "panda_network_erpos.rds"))
 saveRDS(net_erneg, file.path(er_tbl_dir, "panda_network_erneg.rds"))
+
+panda_pdf <- file.path(er_fig_dir, "panda_networks_top_edges.pdf")
+p_erpos <- plot_panda_network(net_erpos, "ERpos")
+p_erneg <- plot_panda_network(net_erneg, "ERneg")
+
+if (is.null(p_erpos) && is.null(p_erneg)) {
+  write_placeholder_pdf(panda_pdf, "PANDA networks unavailable for plotting.")
+} else {
+  grDevices::pdf(panda_pdf, width = 8, height = 6, useDingbats = FALSE)
+  if (!is.null(p_erpos)) print(p_erpos)
+  if (!is.null(p_erneg)) print(p_erneg)
+  grDevices::dev.off()
+}
 
 
 # -------------------- Differential targeting --------------------
