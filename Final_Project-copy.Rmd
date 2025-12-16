@@ -1271,6 +1271,10 @@ The green lines, enrichment scores, for several enrichment pathways (cilium orga
 #### ER-Specific Transcriptional Network Inference Using PANDA
 Force-directed layouts of the top PANDA edges (up to 200 highest |weight| per subtype) illustrate the inferred transcription factor–target wiring in ER-positive and ER-negative tumors. TFs are shown in blue, targets in green, and edges are colored by PANDA weight (red for higher positive weights, blue for negative). The multi-page PDF is saved to `results/er_analysis/figures/panda_networks_top_edges.pdf`.
 
+#### Panda Network Interpretation
+
+These figures display the PANDA gene regulatory network for ER+ and ER- breast cancers, showing the two 200 strongest regulatory edges by weight. As shown, the two breast cancer subtypes are quite different at the regulatory level. The dense red clusters in ER+ and ER- breast cancer show the genes that are consistently expressed in the subtypes, respectively. Of note, some of the genes that are expressed in the PANDA networks are not shown in the top differentially targeted transcription factors (next figure). Differential targeting compares the subtypes while the PANDA networks only show the strongest edges within each condition. 
+
 #### Differential Targeting Reveals Regulatory Rewiring Between ER Subtypes
 The differential targeting heat map illustrates regulatory differences between ER− and ER+ breast cancers for key transcription factors (TFs) and their target genes. Positive values (red/orange) indicate stronger TF targeting in ER− tumors. Negative values (blue) indicate stronger targeting in ER+ tumors. In addition, red/orange reflects a gain in regulatory influence by a TF over a given target, while blue reflects a loss of influence. Although most TF–target interactions show only modest changes, as indicated by pale coloring, some interactions stand out. For example, FOXC1 exhibits strong positive delta targeting across multiple targets, suggesting that FOXC1 acts as a major regulatory driver in ER− tumors.
 
