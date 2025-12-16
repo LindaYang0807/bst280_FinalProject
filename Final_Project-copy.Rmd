@@ -1124,6 +1124,11 @@ p_erneg
 
 ```
 
+![Panda Network (ER Neg)](results/er_analysis/figures/panda_network_erneg.png)
+
+![Panda Network (ER Pos)](results/er_analysis/figures/panda_network_erpos.png)
+
+
 #### 10. Differrential Targeting Analysis
 To quantify subtype-specific regulatory rewiring, PANDA network edge weights from ER-positive and ER-negative samples were merged by shared TF–gene pairs. A differential targeting score was calculated for each edge (delta = Weight_pos − Weight_neg), representing the change in inferred regulatory strength between conditions.
 
